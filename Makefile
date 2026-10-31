@@ -33,16 +33,18 @@ $(BUILD):
 run: all
 	$(QEMU) $(QEMU_ARGS)
 
-# Fails unless the firmware reports RESULT: PASS and QEMU exits with status 0
+# Fails unless the firmware reports RESULT: PASS.
+# stdin is redirected because `timeout` puts QEMU in a background process group, and QEMU
+# freezes if it tries to touch an interactive terminal from there.
 test: all
-	timeout 30 $(QEMU) $(QEMU_ARGS) | tee $(BUILD)/test.log
+	timeout 30 $(QEMU) $(QEMU_ARGS) < /dev/null | tee $(BUILD)/test.log
 	@grep -q "RESULT: PASS" $(BUILD)/test.log && echo "TEST PASSED"
 
 # Triggers a deliberate bus fault to exercise the HardFault handler
 fault-test:
 	$(MAKE) clean
 	$(MAKE) all EXTRA_FLAGS=-DFAULT_TEST
-	-timeout 30 $(QEMU) $(QEMU_ARGS)
+	-timeout 30 $(QEMU) $(QEMU_ARGS) < /dev/null
 	$(MAKE) clean
 
 clean:
