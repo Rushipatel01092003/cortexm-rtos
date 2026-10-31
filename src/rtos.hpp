@@ -10,6 +10,7 @@ namespace rtos {
 
 constexpr std::size_t kMaxTasks = 6;
 constexpr std::uint32_t kStackCanary = 0xDEADBEEF;
+constexpr std::uint32_t kWaitForever = 0xFFFFFFFFu;
 
 enum class State : std::uint8_t { Unused, Ready, Sleeping, Blocked };
 
@@ -22,6 +23,7 @@ struct Tcb {
   std::uint32_t wake_tick;
   std::uint32_t* stack_base;
   std::size_t stack_words;
+  bool has_timeout = false;  // Blocked task also wakes at wake_tick if nobody signals it
 };
 
 using TaskFn = void (*)(void*);
@@ -61,7 +63,9 @@ std::size_t stack_free_words(const Tcb& t);  // high-water mark via stack canary
 class Semaphore {
  public:
   constexpr explicit Semaphore(std::uint32_t initial = 0) : count_(initial) {}
-  void take();  // blocks until a token is available
+  // Blocks until a token is available or timeout_ms elapses. Returns false on timeout.
+  // timeout_ms == 0 is a non-blocking try-take.
+  bool take(std::uint32_t timeout_ms = kWaitForever);
   void give();  // releases one token, wakes one waiter
  private:
   volatile std::uint32_t count_;
@@ -72,8 +76,9 @@ template <typename T, std::size_t N>
 class Queue {
  public:
   constexpr Queue() : items_(0), space_(N) {}
-  void push(const T& v) {
-    space_.take();
+  // Both return false if the timeout expires first (queue still full / still empty).
+  bool push(const T& v, std::uint32_t timeout_ms = kWaitForever) {
+    if (!space_.take(timeout_ms)) return false;
     {
       CriticalSection cs;
       buf_[tail_] = v;
@@ -82,17 +87,22 @@ class Queue {
       if (depth_ > max_depth_) max_depth_ = depth_;
     }
     items_.give();
+    return true;
   }
-  T pop() {
-    items_.take();
-    T v;
+  bool pop(T& out, std::uint32_t timeout_ms) {
+    if (!items_.take(timeout_ms)) return false;
     {
       CriticalSection cs;
-      v = buf_[head_];
+      out = buf_[head_];
       head_ = (head_ + 1) % N;
       --depth_;
     }
     space_.give();
+    return true;
+  }
+  T pop() {  // blocks forever
+    T v{};
+    pop(v, kWaitForever);
     return v;
   }
   std::size_t max_depth() const { return max_depth_; }

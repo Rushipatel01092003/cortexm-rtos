@@ -17,6 +17,12 @@ sensor_task (100 Hz, prio 3) --raw_q--> filter_task (prio 2) --log_q--> logger_t
   first task launched via `SVC`, drift-free `delay_until`.
 - **Synchronization:** counting semaphores with real blocking (tasks leave the ready set) and a
   blocking bounded queue built on them. Critical sections save/restore `PRIMASK`.
+- **Timeouts:** `Semaphore::take(ms)`, `Queue::push/pop(..., ms)` return `false` on expiry
+  (`0` = non-blocking try). SysTick wakes timed-out waiters, so a stalled producer can never
+  hang a consumer.
+- **Watchdog and fault injection:** the filter task uses a 50 ms receive timeout. The sensor
+  deliberately stalls for 300 ms mid-run, and the self-test requires the watchdog to detect it and
+  the pipeline to recover with no lost samples.
 - **Driver:** CMSDK UART driven directly through memory-mapped registers.
 - **Fault handling:** `HardFault` handler selects MSP/PSP, prints stacked PC/LR, CFSR, HFSR, BFAR.
 - **Fixed-point DSP:** scalar Kalman filter in Q16.16 (Cortex-M3 has no FPU).
@@ -37,15 +43,16 @@ samples processed   : 500
 RMS error raw       : 174
 RMS error filtered  : 66
 noise reduction     : 63%
-max pipeline latency: 0 ms        (1 ms tick resolution)
-context switches    : 2002
+watchdog timeouts   : 5           (injected 300 ms sensor stall detected)
+max pipeline latency: 1 ms        (1 ms tick resolution)
+context switches    : 1984
 ```
 Firmware size: about 4.1 KB text, 0.4 KB data.
 
 ## Limitations
 - The IMU is simulated (triangle wave plus uniform noise), not a real sensor.
 - Semaphores have no priority inheritance, so priority inversion is possible in principle.
-- Single core, no dynamic task creation after `start()`, no timeouts on blocking calls.
+- Single core, no dynamic task creation after `start()`.
 - `make test` runs in QEMU, so timing figures are emulated, not measured on silicon.
 
 ## Files

@@ -12,6 +12,10 @@ constexpr std::uint32_t kSamples = 500;
 constexpr std::uint32_t kSamplePeriodMs = 10;  // 100 Hz
 constexpr std::uint32_t kPrintEvery = 50;
 constexpr std::int32_t kNoiseAmp = 300;
+// Fault injection: the sensor stalls once; the filter's watchdog must notice and recover.
+constexpr std::uint32_t kDropoutAtSample = 250;
+constexpr std::uint32_t kDropoutMs = 300;
+constexpr std::uint32_t kWatchdogMs = 50;
 
 struct Sample {
   std::uint32_t tick;
@@ -25,6 +29,7 @@ struct Stats {
   std::uint64_t sq_err_raw = 0;
   std::uint64_t sq_err_filt = 0;
   std::uint32_t max_latency_ms = 0;
+  std::uint32_t timeouts = 0;  // watchdog expirations (no sample within kWatchdogMs)
 };
 
 rtos::Queue<Sample, 8> g_raw_q;
@@ -69,6 +74,7 @@ std::uint32_t isqrt(std::uint64_t v) {
 void sensor_task(void*) {
   std::uint32_t last_wake = rtos::ticks();
   for (std::uint32_t n = 0; n < kSamples; ++n) {
+    if (n == kDropoutAtSample) rtos::sleep_ms(kDropoutMs);  // simulated sensor stall
     rtos::delay_until(last_wake, kSamplePeriodMs);
     std::int32_t truth = true_signal(n);
     std::int32_t noise = static_cast<std::int32_t>(xorshift32() % (2 * kNoiseAmp + 1)) - kNoiseAmp;
@@ -80,8 +86,13 @@ void filter_task(void*) {
   // q: process variance per step (tuned by sweeping 5..3000, best RMS at ~1200),
   // r: measurement variance (uniform +/-300 -> var = 30000)
   KalmanQ16 kf(/*q=*/1200, /*r=*/30000, /*p0=*/30000);
-  for (std::uint32_t n = 0; n < kSamples; ++n) {
-    Sample s = g_raw_q.pop();
+  for (std::uint32_t n = 0; n < kSamples;) {
+    Sample s{};
+    if (!g_raw_q.pop(s, kWatchdogMs)) {  // watchdog: no data for kWatchdogMs
+      ++g_stats.timeouts;
+      continue;
+    }
+    ++n;
     s.filtered = kf.update(s.raw);
     s.latency_ms = rtos::ticks() - s.tick;
     if (s.latency_ms > g_stats.max_latency_ms) g_stats.max_latency_ms = s.latency_ms;
@@ -113,7 +124,9 @@ void print_report(std::uint32_t received) {
   uart::print_u(rms_filt);
   uart::puts("\nnoise reduction     : ");
   uart::print_i(reduction);
-  uart::puts("%\nmax pipeline latency: ");
+  uart::puts("%\nwatchdog timeouts   : ");
+  uart::print_u(g_stats.timeouts);
+  uart::puts("\nmax pipeline latency: ");
   uart::print_u(g_stats.max_latency_ms);
   uart::puts(" ms\ncontext switches    : ");
   uart::print_u(rtos::context_switches());
@@ -135,7 +148,8 @@ void print_report(std::uint32_t received) {
     uart::putc('\n');
   }
 
-  bool pass = received == kSamples && rms_filt < rms_raw;
+  // The injected sensor stall must have been detected by the watchdog.
+  bool pass = received == kSamples && rms_filt < rms_raw && g_stats.timeouts >= 1;
   uart::puts(pass ? "\nRESULT: PASS\n" : "\nRESULT: FAIL\n");
   board::semihost_exit(pass);
 }

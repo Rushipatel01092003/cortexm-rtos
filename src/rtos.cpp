@@ -61,6 +61,13 @@ void SysTick_Handler(void) {
     rtos::Tcb& t = g_tasks[i];
     if (t.state == rtos::State::Sleeping && static_cast<std::int32_t>(now - t.wake_tick) >= 0)
       t.state = rtos::State::Ready;
+    // A task blocked with a timeout becomes Ready at its deadline and re-checks its semaphore.
+    if (t.state == rtos::State::Blocked && t.has_timeout &&
+        static_cast<std::int32_t>(now - t.wake_tick) >= 0) {
+      t.state = rtos::State::Ready;
+      t.wait_obj = nullptr;
+      t.has_timeout = false;
+    }
   }
   request_switch();
 }
@@ -189,18 +196,23 @@ std::size_t stack_free_words(const Tcb& t) {
   return n;
 }
 
-void Semaphore::take() {
+bool Semaphore::take(std::uint32_t timeout_ms) {
+  const bool finite = timeout_ms != kWaitForever;
+  const std::uint32_t deadline = g_ticks + timeout_ms;  // absolute, so re-blocking keeps it
   for (;;) {
     {
       CriticalSection cs;
       if (count_ > 0) {
         --count_;
-        return;
+        return true;
       }
+      if (finite && static_cast<std::int32_t>(g_ticks - deadline) >= 0) return false;
       g_current->state = State::Blocked;
       g_current->wait_obj = this;
+      g_current->has_timeout = finite;
+      g_current->wake_tick = deadline;
     }
-    request_switch();  // resumes here once give() makes this task Ready; then re-check
+    request_switch();  // resumes on give() or at the deadline; then re-check
   }
 }
 
